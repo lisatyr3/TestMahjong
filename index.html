@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elegant Mahjong - Fixed Deadlock</title>
+    <style>
+        :root {
+            --tile-bg: #ffffff;
+            --tile-side: #d1d5db;
+            --tile-back: #065f46;
+            --bg-table: #022c22;
+        }
+
+        body {
+            margin: 0;
+            background: radial-gradient(circle, #064e3b 0%, var(--bg-table) 100%);
+            font-family: 'Segoe UI', Arial, sans-serif;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            height: 100dvh; /* phones: use the visible screen height, not the height behind the browser toolbars */
+            overflow: hidden;
+        }
+
+        header {
+            padding: 10px;
+            text-align: center;
+            flex-shrink: 0;
+            width: 100%;
+        }
+
+        .controls button {
+            padding: 12px 24px;
+            font-size: 1.1rem;
+            cursor: pointer;
+            border: none;
+            border-radius: 8px;
+            font-weight: bold;
+            margin: 0 5px;
+            box-shadow: 0 4px 0 rgba(0,0,0,0.3);
+            transition: all 0.1s;
+        }
+
+        .btn-help { background: #3b82f6; color: white; }
+        .btn-hint { background: #10b981; color: white; }
+        .btn-new { background: #ef4444; color: white; }
+        button:active { transform: translateY(3px); box-shadow: none; }
+
+        .viewport {
+            flex: 1;
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .board-container {
+            position: relative;
+            width: 1000px;
+            height: 800px;
+            flex-shrink: 0; /* PHONE FIX: keep the board its full size so scaling stays centered */
+            transform-origin: center center;
+        }
+
+        .tile {
+            position: absolute;
+            width: 68px;
+            height: 90px;
+            background: white;
+            border-radius: 5px;
+            cursor: pointer;
+            box-shadow: 
+                -1px 1px 0 var(--tile-side),
+                -2px 2px 0 var(--tile-side),
+                -3px 3px 0 var(--tile-back),
+                -4px 4px 0 var(--tile-back),
+                -6px 8px 15px rgba(0,0,0,0.4);
+            border: 1px solid rgba(0,0,0,0.1);
+        }
+
+        .tile.selected {
+            background: #fef08a;
+            transform: translate(2px, -10px);
+            box-shadow: 0 0 25px #facc15, -3px 3px 0 var(--tile-back);
+            z-index: 1000 !important;
+        }
+
+        .tile.blocked { filter: brightness(0.6) grayscale(0.2); }
+        .tile.hidden { display: none; }
+        .tile.hint { animation: blink 0.5s step-end infinite; outline: 4px solid #3b82f6; }
+        @keyframes blink { 50% { outline-color: transparent; } }
+
+        .tile svg { width: 100%; height: 100%; pointer-events: none; }
+
+        .overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.9);
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+        .msg-box {
+            background: white;
+            color: #333;
+            padding: 40px;
+            border-radius: 15px;
+            text-align: center;
+            max-width: 500px;
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="controls">
+        <button class="btn-help" onclick="toggleOverlay('help-overlay', true)">Rules</button>
+        <button class="btn-hint" onclick="getHint()">Need a Hint?</button>
+        <button class="btn-new" onclick="location.reload()">New Game</button>
+    </div>
+    <div style="margin-top: 8px; font-size: 1.2rem;">Tiles Left: <b id="count">144</b></div>
+</header>
+
+<div class="viewport" id="viewport">
+    <div class="board-container" id="board"></div>
+</div>
+
+<div id="help-overlay" class="overlay" onclick="toggleOverlay('help-overlay', false)">
+    <div class="msg-box" onclick="event.stopPropagation()">
+        <h2>How to Play</h2>
+        <ul style="text-align: left; line-height: 1.6;">
+            <li>Match two tiles with the same corner number and color.</li>
+            <li>A tile is <b>playable</b> if it is bright.</li>
+            <li>Dark tiles are <b>blocked</b>.</li>
+        </ul>
+        <button class="btn-help" style="width:100%" onclick="toggleOverlay('help-overlay', false)">Start Game</button>
+    </div>
+</div>
+
+<div id="status-overlay" class="overlay">
+    <div class="msg-box">
+        <h2 id="status-title">No More Moves!</h2>
+        <p id="status-msg">The board is deadlocked.</p>
+        <button class="btn-new" style="width:100%" onclick="location.reload()">Restart</button>
+    </div>
+</div>
+
+<script>
+    const board = document.getElementById('board');
+    const viewport = document.getElementById('viewport');
+    let tiles = [];
+    let selected = null;
+
+    function resize() {
+        const scale = Math.min(viewport.clientWidth / 1050, viewport.clientHeight / 850) * 0.95;
+        board.style.transform = `scale(${scale})`;
+    }
+    window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+    if (window.ResizeObserver) new ResizeObserver(resize).observe(viewport);
+
+    function toggleOverlay(id, show) { document.getElementById(id).style.display = show ? 'flex' : 'none'; }
+
+    function getTileSVG(type, val) {
+        const colors = { dots: '#1e40af', bamboo: '#15803d', char: '#b91c1c', wind: '#334155' };
+        const charMap = {'1':'一','2':'二','3':'三','4':'四','5':'五','6':'六','7':'七','8':'八','9':'九','E':'東','S':'南','W':'西','N':'北','C':'中','F':'發','P':'白'};
+        let artwork = '';
+        if (type === 'dots') {
+            const positions = [[], [[50,50]], [[30,30],[70,70]], [[30,30],[50,50],[70,70]], [[35,35],[65,35],[35,65],[65,65]], [[30,30],[70,30],[50,50],[30,70],[70,70]], [[35,30],[65,30],[35,50],[65,50],[35,70],[65,70]], [[35,25],[65,25],[30,45],[50,50],[70,55],[35,75],[65,75]], [[30,30],[50,30],[70,30],[30,50],[50,50],[70,50],[30,70],[50,70],[70,70]]];
+            (positions[val] || []).forEach(pos => artwork += `<circle cx="${pos[0]}" cy="${pos[1]}" r="8" fill="${colors.dots}"/>`);
+        } else if (type === 'bamboo') {
+            for(let i=0; i<val; i++) artwork += `<rect x="${30 + (i%3)*15}" y="${25 + Math.floor(i/3)*20}" width="8" height="15" rx="2" fill="${colors.bamboo}"/>`;
+        } else {
+            artwork = `<text x="50" y="65" text-anchor="middle" font-size="45" font-weight="bold" fill="${colors[type] || '#333'}">${charMap[val] || val}</text>`;
+            if (type === 'char') artwork += `<text x="50" y="85" text-anchor="middle" font-size="20" fill="${colors.char}">萬</text>`;
+        }
+        return `<svg viewBox="0 0 100 100"><text x="12" y="22" font-size="24" font-weight="900" fill="#333">${val}</text>${artwork}</svg>`;
+    }
+
+    function init() {
+        board.innerHTML = ""; tiles = [];
+        const layout = [];
+        for(let r=0; r<8; r++) for(let c=0; c<12; c++) if ((r>0 && r<7) || (c>0 && c<11)) layout.push({r, c, z:0});
+        for(let r=1; r<7; r++) for(let c=2; c<10; c++) layout.push({r, c, z:1});
+        for(let r=2; r<6; r++) for(let c=4; c<8; c++) layout.push({r, c, z:2});
+        layout.push({r:3.5, c:5.5, z:3}, {r:3.5, c:6.5, z:3});
+        const deck = [];
+        ['dots','bamboo','char'].forEach(s => { for(let i=1; i<=9; i++) for(let j=0; j<4; j++) deck.push({t: s, v: i}); });
+        ['E','S','W','N','C','F'].forEach(v => { for(let j=0; j<4; j++) deck.push({t: 'wind', v: v}); });
+        while(deck.length < 144) deck.push({t: 'wind', v: 'P'});
+        deck.sort(() => Math.random() - 0.5);
+        layout.slice(0, 144).forEach((p, i) => {
+            const t = document.createElement('div');
+            t.className = 'tile';
+            t.dataset.match = deck[i].t + deck[i].v;
+            t.style.left = `${(p.c * 72) - (p.z * 6) + 60}px`;
+            t.style.top = `${(p.r * 92) - (p.z * 6) + 40}px`;
+            t.style.zIndex = p.z;
+            t.dataset.r = p.r; t.dataset.c = p.c; t.dataset.z = p.z;
+            t.innerHTML = getTileSVG(deck[i].t, deck[i].v);
+            t.onclick = () => handleTileClick(t);
+            board.appendChild(t);
+            tiles.push(t);
+        });
+        resize();
+        updateBoardState();
+    }
+
+    function isBlocked(t) {
+        const r = parseFloat(t.dataset.r), c = parseFloat(t.dataset.c), z = parseInt(t.dataset.z);
+        const active = tiles.filter(x => !x.classList.contains('hidden') && x !== t);
+        const onTop = active.some(x => parseInt(x.dataset.z) > z && Math.abs(parseFloat(x.dataset.r)-r) < 1 && Math.abs(parseFloat(x.dataset.c)-c) < 1);
+        if(onTop) return true;
+        const bLeft = active.some(x => parseInt(x.dataset.z) === z && Math.abs(parseFloat(x.dataset.r)-r) < 1 && parseFloat(x.dataset.c) === c-1);
+        const bRight = active.some(x => parseInt(x.dataset.z) === z && Math.abs(parseFloat(x.dataset.r)-r) < 1 && parseFloat(x.dataset.c) === c+1);
+        return bLeft && bRight;
+    }
+
+    function updateBoardState() {
+        const remaining = tiles.filter(t => !t.classList.contains('hidden'));
+        tiles.forEach(t => { if(!t.classList.contains('hidden')) t.classList.toggle('blocked', isBlocked(t)); });
+        document.getElementById('count').textContent = remaining.length;
+        
+        if (remaining.length === 0) {
+            showGameOver("Victory!", "You cleared the board!");
+            return;
+        }
+
+        const free = remaining.filter(t => !isBlocked(t));
+        const hasMove = free.some(t1 => free.some(t2 => t1 !== t2 && t1.dataset.match === t2.dataset.match));
+        if (!hasMove) showGameOver("No More Moves!", "There are no playable matches left.");
+    }
+
+    function showGameOver(title, msg) {
+        document.getElementById('status-title').textContent = title;
+        document.getElementById('status-msg').textContent = msg;
+        toggleOverlay('status-overlay', true);
+    }
+
+    function getHint() {
+        tiles.forEach(t => t.classList.remove('hint'));
+        const free = tiles.filter(t => !t.classList.contains('hidden') && !isBlocked(t));
+        for(let t1 of free) for(let t2 of free) if(t1 !== t2 && t1.dataset.match === t2.dataset.match) {
+            t1.classList.add('hint'); t2.classList.add('hint'); return;
+        }
+    }
+
+    function handleTileClick(t) {
+        if(isBlocked(t)) return;
+        tiles.forEach(tile => tile.classList.remove('hint'));
+        if(!selected) { 
+            selected = t; 
+            t.classList.add('selected'); 
+        }
+        else if(selected === t) { 
+            selected.classList.remove('selected'); 
+            selected = null; 
+        }
+        else if(selected.dataset.match === t.dataset.match) {
+            t.classList.add('hidden'); 
+            selected.classList.add('hidden'); 
+            selected = null; 
+            updateBoardState();
+        } else { 
+            selected.classList.remove('selected'); 
+            selected = t; 
+            t.classList.add('selected'); 
+        }
+        // Force state update on every click to catch deadlocks early
+        if (tiles.filter(t => !t.classList.contains('hidden')).length > 0) {
+            updateBoardState();
+        }
+    }
+
+    init();
+</script>
+</body>
+</html>
